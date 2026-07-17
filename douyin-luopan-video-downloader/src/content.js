@@ -110,6 +110,7 @@
           <input data-setting="maxItems" type="number" min="1" max="200" value="${DEFAULT_SETTINGS.maxItems}">
         </label>
         <div class="luopan-video-downloader-actions">
+          <button class="luopan-video-downloader-button" data-action="one-click">One Click</button>
           <button class="luopan-video-downloader-button" data-action="scan">Scan IDs</button>
           <button class="luopan-video-downloader-button secondary" data-action="probe">Probe</button>
           <button class="luopan-video-downloader-button" data-action="start">Start</button>
@@ -122,6 +123,7 @@
       state.panelOpen = false;
       render();
     });
+    panel.querySelector('[data-action="one-click"]').addEventListener("click", oneClickDownload);
     panel.querySelector('[data-action="scan"]').addEventListener("click", () => scanPageForVideoIds(true));
     panel.querySelector('[data-action="probe"]').addEventListener("click", probeCurrentPage);
     panel.querySelector('[data-action="start"]').addEventListener("click", startDownload);
@@ -140,8 +142,10 @@
     }
 
     const startButton = document.querySelector('[data-action="start"]');
+    const oneClickButton = document.querySelector('[data-action="one-click"]');
     const stopButton = document.querySelector('[data-action="stop"]');
     if (startButton) startButton.disabled = state.busy;
+    if (oneClickButton) oneClickButton.disabled = state.busy;
     if (stopButton) stopButton.disabled = !state.busy;
   }
 
@@ -234,6 +238,80 @@
       state.busy = false;
       updateUi();
     }
+  }
+
+  async function oneClickDownload() {
+    if (state.busy) return;
+    const settings = readSettings();
+    await persistSettings();
+
+    state.busy = true;
+    state.stop = false;
+    state.started = 0;
+    state.completed = 0;
+    state.failed = 0;
+    setStatus("One Click: preparing page and triggering player...");
+
+    try {
+      scanPageForVideoIds(false);
+      collectVisibleDetailLinks();
+
+      let mediaCount = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
+      if (!mediaCount) {
+        await triggerFirstPlayableVideo();
+        mediaCount = await waitForMediaReady(15000);
+      }
+
+      setStatus(`One Click: media ready=${mediaCount}. Starting download...`);
+    } finally {
+      state.busy = false;
+      updateUi();
+    }
+
+    if (!state.stop) await startDownload();
+  }
+
+  async function triggerFirstPlayableVideo() {
+    const candidates = collectClickableVideoCandidates().slice(0, 8);
+    if (!candidates.length) {
+      setStatus("One Click: no clickable video candidate found.");
+      return false;
+    }
+
+    for (const candidate of candidates) {
+      if (state.stop) return false;
+      const beforeUrl = location.href;
+      const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
+      dispatchRealClick(candidate);
+      setStatus("One Click: clicked a visible video candidate, waiting for media...");
+
+      const ready = await waitForMediaReady(5000, beforeMedia);
+      if (ready > beforeMedia) return true;
+
+      const urlVideoId = new URL(location.href).searchParams.get("video_id") || "";
+      if (/^\d{8,}$/.test(urlVideoId)) return true;
+
+      if (location.href !== beforeUrl) {
+        history.back();
+        await waitForUrl(beforeUrl, 3500);
+      }
+      await delay(500);
+    }
+    return false;
+  }
+
+  async function waitForMediaReady(timeoutMs, previousCount = 0) {
+    const startedAt = Date.now();
+    let lastCount = previousCount;
+    while (Date.now() - startedAt < timeoutMs) {
+      scanPageForVideoIds(false);
+      collectVisibleDetailLinks();
+      const count = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
+      lastCount = Math.max(lastCount, count);
+      if (count > previousCount || count > 0) return count;
+      await delay(500);
+    }
+    return lastCount;
   }
 
   async function stopDownload() {
