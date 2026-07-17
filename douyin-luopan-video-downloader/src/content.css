@@ -1,0 +1,128 @@
+.luopan-video-downloader-panel {
+  position: fixed;
+  right: 24px;
+  bottom: 96px;
+  z-index: 2147483647;
+  width: 280px;
+  box-sizing: border-box;
+  color: #15151f;
+  background: #ffffff;
+  border: 1px solid rgba(92, 64, 255, 0.22);
+  box-shadow: 0 12px 32px rgba(23, 16, 66, 0.16);
+  border-radius: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+.luopan-video-downloader-panel * {
+  box-sizing: border-box;
+}
+
+.luopan-video-downloader-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: #f5f3ff;
+  border-bottom: 1px solid rgba(92, 64, 255, 0.14);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.luopan-video-downloader-close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #555066;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 20px;
+}
+
+.luopan-video-downloader-body {
+  padding: 12px;
+}
+
+.luopan-video-downloader-status {
+  min-height: 44px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f7f7fb;
+  color: #4d4b5f;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.luopan-video-downloader-field {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  color: #4d4b5f;
+  font-size: 12px;
+}
+
+.luopan-video-downloader-field input,
+.luopan-video-downloader-field select {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid #d9d6e7;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #15151f;
+  font-size: 12px;
+}
+
+.luopan-video-downloader-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.luopan-video-downloader-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #612cff;
+  border-radius: 6px;
+  background: #612cff;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.luopan-video-downloader-button.secondary {
+  color: #612cff;
+  background: #ffffff;
+}
+
+.luopan-video-downloader-button:disabled {
+  border-color: #c9c6d7;
+  background: #e9e7f1;
+  color: #8a8798;
+  cursor: not-allowed;
+}
+
+.luopan-video-downloader-mini {
+  position: fixed;
+  right: 24px;
+  bottom: 96px;
+  z-index: 2147483647;
+  min-width: 132px;
+  height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #612cff;
+  color: #ffffff;
+  box-shadow: 0 10px 24px rgba(42, 18, 130, 0.24);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}

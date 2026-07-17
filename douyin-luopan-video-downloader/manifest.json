@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Douyin Luopan Rank Video Downloader",
+  "description": "One-click download helper for Douyin Luopan short-video competitor rank pages.",
+  "version": "0.1.0",
+  "permissions": ["downloads", "storage", "tabs", "scripting", "activeTab"],
+  "action": {
+    "default_title": "Show Luopan Downloader"
+  },
+  "host_permissions": [
+    "*://*.jinritemai.com/*",
+    "*://*.douyinec.com/*",
+    "*://*.douyin.com/*",
+    "*://*.iesdouyin.com/*",
+    "*://*.douyinvod.com/*",
+    "*://*.byteimg.com/*",
+    "*://*.douyinpic.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.jinritemai.com/*",
+        "*://*.douyinec.com/*"
+      ],
+      "js": ["src/content.js"],
+      "css": ["src/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/page-hook.js"],
+      "matches": [
+        "*://*.jinritemai.com/*",
+        "*://*.douyinec.com/*"
+      ]
+    }
+  ]
+}
