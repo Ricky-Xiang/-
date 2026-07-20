@@ -19,6 +19,7 @@
     runId: 0,
     rankItems: new Map(),
     mediaItems: new Map(),
+    processedMediaKeys: new Set(),
     started: 0,
     completed: 0,
     failed: 0,
@@ -244,6 +245,7 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.processedMediaKeys.clear();
     updateUi();
 
     try {
@@ -298,6 +300,8 @@
         state.completed += result.started;
         state.failed += result.failed;
         state.started += videos.length;
+        removeProcessedMedia(videos);
+        closeVisiblePlayerOverlay();
         idleRounds = 0;
         setStatus(`一键下载：本轮 ${videos.length} 个。成功=${state.completed}，失败/跳过=${state.failed}`);
       } else {
@@ -307,6 +311,7 @@
 
       if (!settings.autoScroll || scrollRound >= settings.maxScrollRounds || idleRounds >= 2 || state.started >= settings.maxItems) break;
       scrollRound += 1;
+      closeVisiblePlayerOverlay();
       scrollRankList();
       await delay(randomInt(settings.delayMinMs, settings.delayMaxMs));
     }
@@ -318,12 +323,23 @@
 
   function getMediaVideos(limit) {
     const videos = [...collectVisiblePageVideos(), ...collectCapturedMediaVideos()];
-    return videos.slice(0, limit);
+    const out = [];
+    for (const video of videos) {
+      const key = mediaQueueKey(video);
+      if (key && state.processedMediaKeys.has(key)) continue;
+      out.push(video);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   async function submitMediaVideos(videos) {
     const batch = videos;
     if (!batch.length) return { started: 0, failed: 0, skipped: 0 };
+    for (const video of batch) {
+      const key = mediaQueueKey(video);
+      if (key) state.processedMediaKeys.add(key);
+    }
 
     const result = await sendMessage({
       type: "DL_VIDEO_BATCH",
@@ -338,8 +354,70 @@
     };
   }
 
+  function removeProcessedMedia(videos) {
+    for (const video of videos) {
+      const key = mediaQueueKey(video);
+      if (!key) continue;
+      for (const [url, item] of Array.from(state.mediaItems.entries())) {
+        if (mediaQueueKey(item) === key || url === video.url || url === video.sourceUrl) {
+          state.mediaItems.delete(url);
+        }
+      }
+    }
+  }
+
+  function mediaQueueKey(video) {
+    const id = String(video.videoId || video.id || "").trim();
+    if (/^\d{8,}$/.test(id)) return `id:${id}`;
+    const url = video.url || video.sourceUrl || video.playUrl || video.downloadUrl || "";
+    if (!url) return "";
+    try {
+      const parsed = new URL(url);
+      return `url:${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return `url:${url}`;
+    }
+  }
+
+  function closeVisiblePlayerOverlay() {
+    const closeCandidates = Array.from(document.querySelectorAll("button, [role='button'], span, div"))
+      .filter((element) => !isInsideDownloader(element))
+      .filter(isVisible)
+      .filter((element) => {
+        const text = cleanText(element.innerText || element.getAttribute("aria-label") || element.title || "");
+        const className = String(element.className || "");
+        const rect = element.getBoundingClientRect();
+        const looksLikeClose = /关闭|收起|close|modal-close|drawer-close/i.test(`${text} ${className}`);
+        const looksLikeTopRightIcon = rect.width <= 60 && rect.height <= 60 && rect.left > window.innerWidth * 0.55 && rect.top < window.innerHeight * 0.45;
+        return looksLikeClose || looksLikeTopRightIcon;
+      })
+      .sort((a, b) => scoreCloseCandidate(b) - scoreCloseCandidate(a));
+
+    if (closeCandidates[0]) {
+      dispatchRealClick(closeCandidates[0]);
+      return true;
+    }
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    document.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    return false;
+  }
+
+  function scoreCloseCandidate(element) {
+    const text = cleanText(element.innerText || element.getAttribute("aria-label") || element.title || "");
+    const rect = element.getBoundingClientRect();
+    let score = 0;
+    if (/关闭|close/i.test(text)) score += 20;
+    if (rect.left > window.innerWidth * 0.7) score += 5;
+    if (rect.top < window.innerHeight * 0.35) score += 5;
+    if (rect.width <= 40 && rect.height <= 40) score += 3;
+    return score;
+  }
+
   async function triggerFirstPlayableVideo(runId = state.runId) {
-    const candidates = collectClickableVideoCandidates().slice(0, 8);
+    const candidates = collectClickableVideoCandidates()
+      .filter((element) => !element.getAttribute("data-luopan-oneclick-probed"))
+      .slice(0, 8);
     if (!candidates.length) {
       setStatus("一键下载：没有找到可点击的视频入口。");
       return false;
@@ -347,6 +425,7 @@
 
     for (const candidate of candidates) {
       if (state.stop || runId !== state.runId) return false;
+      candidate.setAttribute("data-luopan-oneclick-probed", "true");
       const beforeUrl = location.href;
       const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
       dispatchRealClick(candidate);
