@@ -1,4 +1,5 @@
 const DEFAULT_FOLDER = "douyin-luopan-rank-videos";
+const DOWNLOADED_KEY = "luopanDownloadedVideoKeys";
 
 const slowJob = {
   active: false,
@@ -192,6 +193,13 @@ async function handleSlowDetailVideo(payload = {}, sender = {}) {
 
   if (result.started.length) {
     slowJob.completed += 1;
+  } else if (result.skipped?.length) {
+    slowJob.failed += 1;
+    slowJob.failures.push({
+      reason: result.skipped[0]?.reason || "already downloaded",
+      title: video.title || video.detailTitle || "",
+      url: video.url || ""
+    });
   } else {
     slowJob.failed += 1;
     slowJob.failures.push({
@@ -229,13 +237,21 @@ function recordSlowFailure(reason, sender = {}, token = "") {
 async function downloadBatch(payload = {}) {
   const videos = Array.isArray(payload.videos) ? payload.videos : [];
   const folder = sanitizeDownloadPath(payload.folder || DEFAULT_FOLDER);
+  const downloadedKeys = await readDownloadedKeys();
   const started = [];
   const failed = [];
+  const skipped = [];
 
   for (const [index, video] of videos.entries()) {
     const url = pickDownloadUrl(video);
     if (!url) {
       failed.push({ index, reason: "no downloadable video URL", video });
+      continue;
+    }
+
+    const key = makeDedupeKey(video, url);
+    if (downloadedKeys.has(key)) {
+      skipped.push({ index, reason: "already downloaded", key, url, video });
       continue;
     }
 
@@ -258,13 +274,65 @@ async function downloadBatch(payload = {}) {
         saveAs: false
       });
       started.push({ index, downloadId, filename, url });
+      downloadedKeys.add(key);
       await delay(250);
     } catch (error) {
       failed.push({ index, reason: String(error?.message || error), video });
     }
   }
 
-  return { requested: videos.length, started, failed };
+  if (started.length) await writeDownloadedKeys(downloadedKeys);
+  return { requested: videos.length, started, failed, skipped };
+}
+
+async function readDownloadedKeys() {
+  const result = await chromeStorageGet(DOWNLOADED_KEY).catch(() => ({}));
+  return new Set(Array.isArray(result[DOWNLOADED_KEY]) ? result[DOWNLOADED_KEY] : []);
+}
+
+async function writeDownloadedKeys(keys) {
+  const values = Array.from(keys).slice(-5000);
+  await chromeStorageSet({ [DOWNLOADED_KEY]: values }).catch(() => {});
+}
+
+function chromeStorageGet(key) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(key, (result) => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(result || {});
+    });
+  });
+}
+
+function chromeStorageSet(value) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(value, () => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve();
+    });
+  });
+}
+
+function makeDedupeKey(video, url) {
+  const id = String(video.videoId || video.id || "").trim();
+  if (/^\d{8,}$/.test(id)) return `id:${id}`;
+  return `url:${normalizeMediaUrl(url)}`;
+}
+
+function normalizeMediaUrl(url) {
+  try {
+    const parsed = new URL(url);
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (/^(x-expires|expires|expire|sign|signature|token|auth|br|btm_|ts|t)$/i.test(key)) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    return `${parsed.origin}${parsed.pathname}?${parsed.searchParams.toString()}`;
+  } catch {
+    return String(url || "");
+  }
 }
 
 function chromeDownload(options) {

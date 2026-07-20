@@ -7,7 +7,9 @@
     delayMinMs: 4000,
     delayMaxMs: 8000,
     detailTimeoutMs: 30000,
-    maxItems: 50
+    maxItems: 50,
+    autoScroll: true,
+    maxScrollRounds: 5
   };
 
   const state = {
@@ -17,6 +19,7 @@
     runId: 0,
     rankItems: new Map(),
     mediaItems: new Map(),
+    submittedKeys: new Set(),
     started: 0,
     completed: 0,
     failed: 0,
@@ -110,6 +113,10 @@
           <span>最多</span>
           <input data-setting="maxItems" type="number" min="1" max="200" value="${DEFAULT_SETTINGS.maxItems}">
         </label>
+        <label class="luopan-video-downloader-field">
+          <span>翻页</span>
+          <label><input data-setting="autoScroll" type="checkbox" checked> 自动滚动</label>
+        </label>
         <div class="luopan-video-downloader-actions">
           <button class="luopan-video-downloader-button" data-action="one-click">一键下载</button>
           <button class="luopan-video-downloader-button" data-action="scan">扫描ID</button>
@@ -133,6 +140,7 @@
     panel.querySelector('[data-action="reset"]').addEventListener("click", resetDownloadState);
     panel.querySelector('[data-setting="delay"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="maxItems"]').addEventListener("change", persistSettings);
+    panel.querySelector('[data-setting="autoScroll"]').addEventListener("change", persistSettings);
 
     root.appendChild(panel);
     updateUi();
@@ -162,8 +170,10 @@
     const settings = { ...DEFAULT_SETTINGS, ...(result[STORE_KEY] || {}) };
     const delay = document.querySelector('[data-setting="delay"]');
     const maxItems = document.querySelector('[data-setting="maxItems"]');
+    const autoScroll = document.querySelector('[data-setting="autoScroll"]');
     if (delay) delay.value = `${settings.delayMinMs},${settings.delayMaxMs}`;
     if (maxItems) maxItems.value = String(settings.maxItems);
+    if (autoScroll) autoScroll.checked = Boolean(settings.autoScroll);
   }
 
   async function persistSettings() {
@@ -174,11 +184,14 @@
     const delayValue = document.querySelector('[data-setting="delay"]')?.value || "4000,8000";
     const [delayMinMs, delayMaxMs] = delayValue.split(",").map(Number);
     const maxItems = clamp(Number(document.querySelector('[data-setting="maxItems"]')?.value || DEFAULT_SETTINGS.maxItems), 1, 200);
+    const autoScroll = Boolean(document.querySelector('[data-setting="autoScroll"]')?.checked);
     return {
       delayMinMs: Number.isFinite(delayMinMs) ? delayMinMs : DEFAULT_SETTINGS.delayMinMs,
       delayMaxMs: Number.isFinite(delayMaxMs) ? delayMaxMs : DEFAULT_SETTINGS.delayMaxMs,
       detailTimeoutMs: DEFAULT_SETTINGS.detailTimeoutMs,
-      maxItems
+      maxItems,
+      autoScroll,
+      maxScrollRounds: DEFAULT_SETTINGS.maxScrollRounds
     };
   }
 
@@ -192,9 +205,7 @@
     scanPageForVideoIds(false);
     collectVisibleDetailLinks();
 
-    const directVideos = collectVisiblePageVideos();
-    const capturedVideos = collectCapturedMediaVideos();
-    const firstPassVideos = [...directVideos, ...capturedVideos].slice(0, settings.maxItems);
+    const firstPassVideos = getUnsubmittedMediaVideos(settings.maxItems);
     if (state.stop || runId !== state.runId) return;
 
     if (firstPassVideos.length) {
@@ -204,20 +215,11 @@
       state.failed = 0;
       setStatus(`发现 ${firstPassVideos.length} 个媒体地址，正在直接提交下载...`);
       try {
-        if (state.stop || runId !== state.runId) return;
-        const result = await sendMessage({
-          type: "DL_VIDEO_BATCH",
-          payload: {
-            folder: makeFolderName(),
-            videos: firstPassVideos
-          }
-        });
-        const started = result?.result?.started?.length || 0;
-        const failed = result?.result?.failed?.length || 0;
+        const { started, failed, skipped } = await submitMediaVideos(firstPassVideos);
         if (!state.stop && runId === state.runId) {
           state.completed = started;
-          state.failed = failed;
-          setStatus(`直接下载已提交。成功=${started}，跳过=${failed}`);
+          state.failed = failed + skipped;
+          setStatus(`直接下载已提交。成功=${started}，跳过=${failed + skipped}`);
         }
       } finally {
         state.busy = false;
@@ -242,6 +244,7 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.submittedKeys.clear();
     updateUi();
 
     try {
@@ -265,25 +268,109 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.submittedKeys.clear();
     setStatus("一键下载：正在准备页面并触发播放器...");
 
     try {
-      scanPageForVideoIds(false);
-      collectVisibleDetailLinks();
-
-      let mediaCount = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
-      if (!mediaCount && !state.stop && runId === state.runId) {
-        await triggerFirstPlayableVideo(runId);
-        mediaCount = await waitForMediaReady(15000, 0, runId);
-      }
-
-      if (!state.stop && runId === state.runId) setStatus(`一键下载：已发现媒体=${mediaCount}，开始下载...`);
+      await runOneClickRounds(settings, runId);
     } finally {
       state.busy = false;
       updateUi();
     }
+  }
 
-    if (!state.stop && runId === state.runId) await startDownload();
+  async function runOneClickRounds(settings, runId) {
+    let scrollRound = 0;
+    let idleRounds = 0;
+
+    while (!state.stop && runId === state.runId && state.started < settings.maxItems) {
+      scanPageForVideoIds(false);
+      collectVisibleDetailLinks();
+
+      let videos = getUnsubmittedMediaVideos(settings.maxItems - state.started);
+      if (!videos.length) {
+        const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
+        await triggerFirstPlayableVideo(runId);
+        await waitForMediaReady(12000, beforeMedia, runId);
+        videos = getUnsubmittedMediaVideos(settings.maxItems - state.started);
+      }
+
+      if (videos.length) {
+        const result = await submitMediaVideos(videos);
+        state.completed += result.started;
+        state.failed += result.failed + result.skipped;
+        state.started += videos.length;
+        idleRounds = 0;
+        setStatus(`一键下载：本轮提交 ${videos.length} 个。成功=${state.completed}，跳过=${state.failed}`);
+      } else {
+        idleRounds += 1;
+        setStatus(`一键下载：本屏暂无新媒体。空轮次=${idleRounds}`);
+      }
+
+      if (!settings.autoScroll || scrollRound >= settings.maxScrollRounds || idleRounds >= 2 || state.started >= settings.maxItems) break;
+      scrollRound += 1;
+      scrollRankList();
+      await delay(randomInt(settings.delayMinMs, settings.delayMaxMs));
+    }
+
+    if (!state.stop && runId === state.runId) {
+      setStatus(`一键下载结束。成功=${state.completed}，跳过=${state.failed}，处理=${state.started}`);
+    }
+  }
+
+  function getUnsubmittedMediaVideos(limit) {
+    const videos = [...collectVisiblePageVideos(), ...collectCapturedMediaVideos()];
+    const out = [];
+    for (const video of videos) {
+      const key = mediaDedupeKey(video);
+      if (!key || state.submittedKeys.has(key)) continue;
+      out.push(video);
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  async function submitMediaVideos(videos) {
+    const batch = videos.filter((video) => {
+      const key = mediaDedupeKey(video);
+      if (!key || state.submittedKeys.has(key)) return false;
+      state.submittedKeys.add(key);
+      return true;
+    });
+    if (!batch.length) return { started: 0, failed: 0, skipped: 0 };
+
+    const result = await sendMessage({
+      type: "DL_VIDEO_BATCH",
+      payload: {
+        folder: makeFolderName(),
+        videos: batch
+      }
+    });
+    return {
+      started: result?.result?.started?.length || 0,
+      failed: result?.result?.failed?.length || 0,
+      skipped: result?.result?.skipped?.length || 0
+    };
+  }
+
+  function mediaDedupeKey(video) {
+    if (video.videoId && /^\d{8,}$/.test(String(video.videoId))) return `id:${video.videoId}`;
+    const url = video.url || video.sourceUrl || video.playUrl || video.downloadUrl || "";
+    return url ? `url:${normalizeMediaUrl(url)}` : "";
+  }
+
+  function normalizeMediaUrl(url) {
+    try {
+      const parsed = new URL(url);
+      for (const key of Array.from(parsed.searchParams.keys())) {
+        if (/^(x-expires|expires|expire|sign|signature|token|auth|br|btm_|ts|t)$/i.test(key)) {
+          parsed.searchParams.delete(key);
+        }
+      }
+      return `${parsed.origin}${parsed.pathname}?${parsed.searchParams.toString()}`;
+    } catch {
+      return String(url || "");
+    }
   }
 
   async function triggerFirstPlayableVideo(runId = state.runId) {
