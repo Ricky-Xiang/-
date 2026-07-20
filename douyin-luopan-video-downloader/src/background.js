@@ -1,6 +1,4 @@
 const DEFAULT_FOLDER = "douyin-luopan-rank-videos";
-const DOWNLOADED_KEY = "luopanDownloadedVideoKeys";
-
 const slowJob = {
   active: false,
   folder: DEFAULT_FOLDER,
@@ -52,13 +50,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "SLOW_JOB_STATUS") {
     publicSlowJobStatusAsync()
       .then((result) => sendResponse({ ok: true, result }))
-      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
-    return true;
-  }
-
-  if (message.type === "DEDUP_CLEAR") {
-    chromeStorageSet({ [DOWNLOADED_KEY]: [] })
-      .then(() => sendResponse({ ok: true, result: { dedupeCount: 0 } }))
       .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }
@@ -154,11 +145,7 @@ function publicSlowJobStatus() {
 }
 
 async function publicSlowJobStatusAsync() {
-  const keys = await readDownloadedKeys();
-  return {
-    ...publicSlowJobStatus(),
-    dedupeCount: keys.size
-  };
+  return publicSlowJobStatus();
 }
 
 async function openDetailTab(payload = {}) {
@@ -210,13 +197,6 @@ async function handleSlowDetailVideo(payload = {}, sender = {}) {
 
   if (result.started.length) {
     slowJob.completed += 1;
-  } else if (result.skipped?.length) {
-    slowJob.failed += 1;
-    slowJob.failures.push({
-      reason: result.skipped[0]?.reason || "already downloaded",
-      title: video.title || video.detailTitle || "",
-      url: video.url || ""
-    });
   } else {
     slowJob.failed += 1;
     slowJob.failures.push({
@@ -254,10 +234,8 @@ function recordSlowFailure(reason, sender = {}, token = "") {
 async function downloadBatch(payload = {}) {
   const videos = Array.isArray(payload.videos) ? payload.videos : [];
   const folder = sanitizeDownloadPath(payload.folder || DEFAULT_FOLDER);
-  const downloadedKeys = await readDownloadedKeys();
   const started = [];
   const failed = [];
-  const skipped = [];
 
   for (const [index, video] of videos.entries()) {
     const url = pickDownloadUrl(video);
@@ -276,18 +254,6 @@ async function downloadBatch(payload = {}) {
     const rankPrefix = video.rank ? `${String(video.rank).padStart(3, "0")}_` : `${String(index + 1).padStart(3, "0")}_`;
     const title = sanitizePathSegment(video.title || video.author || video.videoId || `video_${index + 1}`);
     const filename = `${folder}/${rankPrefix}${title}.${ext}`;
-    const keys = makeDedupeKeys(video, validation.finalUrl || url, filename);
-    const matchedKey = keys.find((key) => downloadedKeys.has(key));
-    if (matchedKey) {
-      skipped.push({ index, reason: "already downloaded", key: matchedKey, url, filename, video });
-      continue;
-    }
-
-    if (await hasExistingDownload(filename)) {
-      for (const key of keys) downloadedKeys.add(key);
-      skipped.push({ index, reason: "same filename already exists in browser download history", key: `file:${filename}`, url, filename, video });
-      continue;
-    }
 
     try {
       const downloadId = await chromeDownload({
@@ -297,97 +263,13 @@ async function downloadBatch(payload = {}) {
         saveAs: false
       });
       started.push({ index, downloadId, filename, url });
-      for (const key of keys) downloadedKeys.add(key);
       await delay(250);
     } catch (error) {
       failed.push({ index, reason: String(error?.message || error), video });
     }
   }
 
-  if (started.length || skipped.length) await writeDownloadedKeys(downloadedKeys);
-  return { requested: videos.length, started, failed, skipped };
-}
-
-async function readDownloadedKeys() {
-  const result = await chromeStorageGet(DOWNLOADED_KEY).catch(() => ({}));
-  return new Set(Array.isArray(result[DOWNLOADED_KEY]) ? result[DOWNLOADED_KEY] : []);
-}
-
-async function writeDownloadedKeys(keys) {
-  const values = Array.from(keys).slice(-5000);
-  await chromeStorageSet({ [DOWNLOADED_KEY]: values }).catch(() => {});
-}
-
-function chromeStorageGet(key) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get(key, (result) => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else resolve(result || {});
-    });
-  });
-}
-
-function chromeStorageSet(value) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.set(value, () => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else resolve();
-    });
-  });
-}
-
-function makeDedupeKeys(video, url, filename) {
-  const keys = [];
-  const id = String(video.videoId || video.id || "").trim();
-  if (/^\d{8,}$/.test(id)) keys.push(`id:${id}`);
-  keys.push(`url:${normalizeMediaUrl(url)}`);
-  if (filename) {
-    keys.push(`file:${filename.toLowerCase()}`);
-    keys.push(`name:${pathBasename(filename).replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase()}`);
-  }
-  return Array.from(new Set(keys.filter(Boolean)));
-}
-
-function normalizeMediaUrl(url) {
-  try {
-    const parsed = new URL(url);
-    for (const key of Array.from(parsed.searchParams.keys())) {
-      if (/^(x-expires|expires|expire|sign|signature|token|auth|br|btm_|ts|t)$/i.test(key)) {
-        parsed.searchParams.delete(key);
-      }
-    }
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return String(url || "");
-  }
-}
-
-async function hasExistingDownload(filename) {
-  const base = pathBasename(filename);
-  const normalizedBase = base.replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase();
-  const stem = normalizedBase.replace(/\.[^.]+$/, "");
-  const query = stem.length > 6 ? stem.slice(0, Math.min(stem.length, 32)) : stem;
-  const matches = await chromeDownloadsSearch({ query: query ? [query] : [], limit: 200 }).catch(() => []);
-  return matches.some((item) => {
-    const itemBase = pathBasename(item.filename || "").replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase();
-    return itemBase === normalizedBase && item.exists !== false;
-  });
-}
-
-function chromeDownloadsSearch(options) {
-  return new Promise((resolve, reject) => {
-    chrome.downloads.search(options, (items) => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message));
-      else resolve(items || []);
-    });
-  });
-}
-
-function pathBasename(value) {
-  return String(value || "").split(/[\\/]+/).pop() || "";
+  return { requested: videos.length, started, failed };
 }
 
 function chromeDownload(options) {

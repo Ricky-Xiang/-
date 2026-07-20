@@ -19,12 +19,9 @@
     runId: 0,
     rankItems: new Map(),
     mediaItems: new Map(),
-    submittedKeys: new Set(),
     started: 0,
     completed: 0,
     failed: 0,
-    skippedDuplicate: 0,
-    dedupeCount: 0,
     lastMessage: "就绪：先扫描或一键下载，仅下载可正常播放的视频。"
   };
 
@@ -126,7 +123,6 @@
           <button class="luopan-video-downloader-button" data-action="start">开始</button>
           <button class="luopan-video-downloader-button secondary" data-action="stop">停止</button>
           <button class="luopan-video-downloader-button secondary" data-action="reset">重置</button>
-          <button class="luopan-video-downloader-button secondary" data-action="clear-dedupe">清空去重</button>
         </div>
       </div>
     `;
@@ -141,7 +137,6 @@
     panel.querySelector('[data-action="start"]').addEventListener("click", startDownload);
     panel.querySelector('[data-action="stop"]').addEventListener("click", stopDownload);
     panel.querySelector('[data-action="reset"]').addEventListener("click", resetDownloadState);
-    panel.querySelector('[data-action="clear-dedupe"]').addEventListener("click", clearDedupeHistory);
     panel.querySelector('[data-setting="delay"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="maxItems"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="autoScroll"]').addEventListener("change", persistSettings);
@@ -153,7 +148,7 @@
   function updateUi() {
     const status = document.querySelector(".luopan-video-downloader-status");
     if (status) {
-      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}，重复=${state.skippedDuplicate}，历史=${state.dedupeCount}`;
+      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}`;
     }
 
     const startButton = document.querySelector('[data-action="start"]');
@@ -178,7 +173,6 @@
     if (delay) delay.value = `${settings.delayMinMs},${settings.delayMaxMs}`;
     if (maxItems) maxItems.value = String(settings.maxItems);
     if (autoScroll) autoScroll.checked = Boolean(settings.autoScroll);
-    await refreshDedupeStatus();
     updateUi();
   }
 
@@ -211,7 +205,7 @@
     scanPageForVideoIds(false);
     collectVisibleDetailLinks();
 
-    const firstPassVideos = getUnsubmittedMediaVideos(settings.maxItems);
+    const firstPassVideos = getMediaVideos(settings.maxItems);
     if (state.stop || runId !== state.runId) return;
 
     if (firstPassVideos.length) {
@@ -221,13 +215,11 @@
       state.failed = 0;
       setStatus(`发现 ${firstPassVideos.length} 个媒体地址，正在直接提交下载...`);
       try {
-        const { started, failed, skipped } = await submitMediaVideos(firstPassVideos);
+        const { started, failed } = await submitMediaVideos(firstPassVideos);
         if (!state.stop && runId === state.runId) {
           state.completed = started;
-          state.failed = failed + skipped;
-          state.skippedDuplicate += skipped;
-          await refreshDedupeStatus();
-          setStatus(`直接下载已提交。成功=${started}，失败=${failed}，重复跳过=${skipped}`);
+          state.failed = failed;
+          setStatus(`直接下载已提交。成功=${started}，失败=${failed}`);
         }
       } finally {
         state.busy = false;
@@ -252,8 +244,6 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
-    state.skippedDuplicate = 0;
-    state.submittedKeys.clear();
     updateUi();
 
     try {
@@ -277,7 +267,6 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
-    state.submittedKeys.clear();
     setStatus("一键下载：正在准备页面并触发播放器...");
 
     try {
@@ -296,23 +285,21 @@
       scanPageForVideoIds(false);
       collectVisibleDetailLinks();
 
-      let videos = getUnsubmittedMediaVideos(settings.maxItems - state.started);
+      let videos = getMediaVideos(settings.maxItems - state.started);
       if (!videos.length) {
         const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
         await triggerFirstPlayableVideo(runId);
         await waitForMediaReady(12000, beforeMedia, runId);
-        videos = getUnsubmittedMediaVideos(settings.maxItems - state.started);
+        videos = getMediaVideos(settings.maxItems - state.started);
       }
 
       if (videos.length) {
         const result = await submitMediaVideos(videos);
         state.completed += result.started;
-        state.failed += result.failed + result.skipped;
-        state.skippedDuplicate += result.skipped;
+        state.failed += result.failed;
         state.started += videos.length;
-        await refreshDedupeStatus();
         idleRounds = 0;
-        setStatus(`一键下载：本轮 ${videos.length} 个。成功=${state.completed}，失败/跳过=${state.failed}，重复=${state.skippedDuplicate}`);
+        setStatus(`一键下载：本轮 ${videos.length} 个。成功=${state.completed}，失败/跳过=${state.failed}`);
       } else {
         idleRounds += 1;
         setStatus(`一键下载：本屏暂无新媒体。空轮次=${idleRounds}`);
@@ -329,25 +316,13 @@
     }
   }
 
-  function getUnsubmittedMediaVideos(limit) {
+  function getMediaVideos(limit) {
     const videos = [...collectVisiblePageVideos(), ...collectCapturedMediaVideos()];
-    const out = [];
-    for (const video of videos) {
-      const key = mediaDedupeKey(video);
-      if (!key || state.submittedKeys.has(key)) continue;
-      out.push(video);
-      if (out.length >= limit) break;
-    }
-    return out;
+    return videos.slice(0, limit);
   }
 
   async function submitMediaVideos(videos) {
-    const batch = videos.filter((video) => {
-      const key = mediaDedupeKey(video);
-      if (!key || state.submittedKeys.has(key)) return false;
-      state.submittedKeys.add(key);
-      return true;
-    });
+    const batch = videos;
     if (!batch.length) return { started: 0, failed: 0, skipped: 0 };
 
     const result = await sendMessage({
@@ -359,29 +334,8 @@
     });
     return {
       started: result?.result?.started?.length || 0,
-      failed: result?.result?.failed?.length || 0,
-      skipped: result?.result?.skipped?.length || 0
+      failed: result?.result?.failed?.length || 0
     };
-  }
-
-  function mediaDedupeKey(video) {
-    if (video.videoId && /^\d{8,}$/.test(String(video.videoId))) return `id:${video.videoId}`;
-    const url = video.url || video.sourceUrl || video.playUrl || video.downloadUrl || "";
-    return url ? `url:${normalizeMediaUrl(url)}` : "";
-  }
-
-  function normalizeMediaUrl(url) {
-    try {
-      const parsed = new URL(url);
-      for (const key of Array.from(parsed.searchParams.keys())) {
-        if (/^(x-expires|expires|expire|sign|signature|token|auth|br|btm_|ts|t)$/i.test(key)) {
-          parsed.searchParams.delete(key);
-        }
-      }
-      return `${parsed.origin}${parsed.pathname}?${parsed.searchParams.toString()}`;
-    } catch {
-      return String(url || "");
-    }
   }
 
   async function triggerFirstPlayableVideo(runId = state.runId) {
@@ -444,30 +398,11 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
-    state.skippedDuplicate = 0;
     await sendMessage({ type: "SLOW_JOB_STOP" });
     setStatus("已重置，可以重新点击一键下载或开始。");
     updateUi();
   }
 
-  async function clearDedupeHistory() {
-    const response = await sendMessage({ type: "DEDUP_CLEAR" });
-    if (response?.ok) {
-      state.dedupeCount = 0;
-      state.skippedDuplicate = 0;
-      setStatus("已清空去重记录，后续会重新下载已遇到的视频。");
-    } else {
-      setStatus(`清空去重失败：${response?.error || "未知错误"}`);
-    }
-    updateUi();
-  }
-
-  async function refreshDedupeStatus() {
-    const response = await sendMessage({ type: "SLOW_JOB_STATUS" });
-    if (response?.ok && Number.isFinite(response.result?.dedupeCount)) {
-      state.dedupeCount = response.result.dedupeCount;
-    }
-  }
 
   async function processQueue(settings, runId = state.runId) {
     let idleRounds = 0;
