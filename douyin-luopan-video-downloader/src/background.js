@@ -266,12 +266,6 @@ async function downloadBatch(payload = {}) {
       continue;
     }
 
-    const key = makeDedupeKey(video, url);
-    if (downloadedKeys.has(key)) {
-      skipped.push({ index, reason: "already downloaded", key, url, video });
-      continue;
-    }
-
     const validation = await validateDownloadUrl(url);
     if (!validation.ok) {
       failed.push({ index, reason: validation.reason, url, video });
@@ -282,6 +276,18 @@ async function downloadBatch(payload = {}) {
     const rankPrefix = video.rank ? `${String(video.rank).padStart(3, "0")}_` : `${String(index + 1).padStart(3, "0")}_`;
     const title = sanitizePathSegment(video.title || video.author || video.videoId || `video_${index + 1}`);
     const filename = `${folder}/${rankPrefix}${title}.${ext}`;
+    const keys = makeDedupeKeys(video, validation.finalUrl || url, filename);
+    const matchedKey = keys.find((key) => downloadedKeys.has(key));
+    if (matchedKey) {
+      skipped.push({ index, reason: "already downloaded", key: matchedKey, url, filename, video });
+      continue;
+    }
+
+    if (await hasExistingDownload(filename)) {
+      for (const key of keys) downloadedKeys.add(key);
+      skipped.push({ index, reason: "same filename already exists in browser download history", key: `file:${filename}`, url, filename, video });
+      continue;
+    }
 
     try {
       const downloadId = await chromeDownload({
@@ -291,14 +297,14 @@ async function downloadBatch(payload = {}) {
         saveAs: false
       });
       started.push({ index, downloadId, filename, url });
-      downloadedKeys.add(key);
+      for (const key of keys) downloadedKeys.add(key);
       await delay(250);
     } catch (error) {
       failed.push({ index, reason: String(error?.message || error), video });
     }
   }
 
-  if (started.length) await writeDownloadedKeys(downloadedKeys);
+  if (started.length || skipped.length) await writeDownloadedKeys(downloadedKeys);
   return { requested: videos.length, started, failed, skipped };
 }
 
@@ -332,10 +338,16 @@ function chromeStorageSet(value) {
   });
 }
 
-function makeDedupeKey(video, url) {
+function makeDedupeKeys(video, url, filename) {
+  const keys = [];
   const id = String(video.videoId || video.id || "").trim();
-  if (/^\d{8,}$/.test(id)) return `id:${id}`;
-  return `url:${normalizeMediaUrl(url)}`;
+  if (/^\d{8,}$/.test(id)) keys.push(`id:${id}`);
+  keys.push(`url:${normalizeMediaUrl(url)}`);
+  if (filename) {
+    keys.push(`file:${filename.toLowerCase()}`);
+    keys.push(`name:${pathBasename(filename).replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase()}`);
+  }
+  return Array.from(new Set(keys.filter(Boolean)));
 }
 
 function normalizeMediaUrl(url) {
@@ -346,10 +358,36 @@ function normalizeMediaUrl(url) {
         parsed.searchParams.delete(key);
       }
     }
-    return `${parsed.origin}${parsed.pathname}?${parsed.searchParams.toString()}`;
+    return `${parsed.origin}${parsed.pathname}`;
   } catch {
     return String(url || "");
   }
+}
+
+async function hasExistingDownload(filename) {
+  const base = pathBasename(filename);
+  const normalizedBase = base.replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase();
+  const stem = normalizedBase.replace(/\.[^.]+$/, "");
+  const query = stem.length > 6 ? stem.slice(0, Math.min(stem.length, 32)) : stem;
+  const matches = await chromeDownloadsSearch({ query: query ? [query] : [], limit: 200 }).catch(() => []);
+  return matches.some((item) => {
+    const itemBase = pathBasename(item.filename || "").replace(/\s+\(\d+\)(?=\.[^.]+$)/, "").toLowerCase();
+    return itemBase === normalizedBase && item.exists !== false;
+  });
+}
+
+function chromeDownloadsSearch(options) {
+  return new Promise((resolve, reject) => {
+    chrome.downloads.search(options, (items) => {
+      const error = chrome.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(items || []);
+    });
+  });
+}
+
+function pathBasename(value) {
+  return String(value || "").split(/[\\/]+/).pop() || "";
 }
 
 function chromeDownload(options) {
