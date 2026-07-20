@@ -50,8 +50,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "SLOW_JOB_STATUS") {
-    sendResponse({ ok: true, result: publicSlowJobStatus() });
-    return false;
+    publicSlowJobStatusAsync()
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
+
+  if (message.type === "DEDUP_CLEAR") {
+    chromeStorageSet({ [DOWNLOADED_KEY]: [] })
+      .then(() => sendResponse({ ok: true, result: { dedupeCount: 0 } }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
   }
 
   if (message.type === "SLOW_DETAIL_READY") {
@@ -141,6 +150,14 @@ function publicSlowJobStatus() {
     completed: slowJob.completed,
     failed: slowJob.failed,
     failures: slowJob.failures.slice(-10)
+  };
+}
+
+async function publicSlowJobStatusAsync() {
+  const keys = await readDownloadedKeys();
+  return {
+    ...publicSlowJobStatus(),
+    dedupeCount: keys.size
   };
 }
 

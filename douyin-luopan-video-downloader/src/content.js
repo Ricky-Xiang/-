@@ -23,6 +23,8 @@
     started: 0,
     completed: 0,
     failed: 0,
+    skippedDuplicate: 0,
+    dedupeCount: 0,
     lastMessage: "就绪：先扫描或一键下载，仅下载可正常播放的视频。"
   };
 
@@ -124,6 +126,7 @@
           <button class="luopan-video-downloader-button" data-action="start">开始</button>
           <button class="luopan-video-downloader-button secondary" data-action="stop">停止</button>
           <button class="luopan-video-downloader-button secondary" data-action="reset">重置</button>
+          <button class="luopan-video-downloader-button secondary" data-action="clear-dedupe">清空去重</button>
         </div>
       </div>
     `;
@@ -138,6 +141,7 @@
     panel.querySelector('[data-action="start"]').addEventListener("click", startDownload);
     panel.querySelector('[data-action="stop"]').addEventListener("click", stopDownload);
     panel.querySelector('[data-action="reset"]').addEventListener("click", resetDownloadState);
+    panel.querySelector('[data-action="clear-dedupe"]').addEventListener("click", clearDedupeHistory);
     panel.querySelector('[data-setting="delay"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="maxItems"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="autoScroll"]').addEventListener("change", persistSettings);
@@ -149,7 +153,7 @@
   function updateUi() {
     const status = document.querySelector(".luopan-video-downloader-status");
     if (status) {
-      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}`;
+      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}，重复=${state.skippedDuplicate}，历史=${state.dedupeCount}`;
     }
 
     const startButton = document.querySelector('[data-action="start"]');
@@ -174,6 +178,8 @@
     if (delay) delay.value = `${settings.delayMinMs},${settings.delayMaxMs}`;
     if (maxItems) maxItems.value = String(settings.maxItems);
     if (autoScroll) autoScroll.checked = Boolean(settings.autoScroll);
+    await refreshDedupeStatus();
+    updateUi();
   }
 
   async function persistSettings() {
@@ -219,7 +225,9 @@
         if (!state.stop && runId === state.runId) {
           state.completed = started;
           state.failed = failed + skipped;
-          setStatus(`直接下载已提交。成功=${started}，跳过=${failed + skipped}`);
+          state.skippedDuplicate += skipped;
+          await refreshDedupeStatus();
+          setStatus(`直接下载已提交。成功=${started}，失败=${failed}，重复跳过=${skipped}`);
         }
       } finally {
         state.busy = false;
@@ -244,6 +252,7 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.skippedDuplicate = 0;
     state.submittedKeys.clear();
     updateUi();
 
@@ -299,9 +308,11 @@
         const result = await submitMediaVideos(videos);
         state.completed += result.started;
         state.failed += result.failed + result.skipped;
+        state.skippedDuplicate += result.skipped;
         state.started += videos.length;
+        await refreshDedupeStatus();
         idleRounds = 0;
-        setStatus(`一键下载：本轮提交 ${videos.length} 个。成功=${state.completed}，跳过=${state.failed}`);
+        setStatus(`一键下载：本轮 ${videos.length} 个。成功=${state.completed}，失败/跳过=${state.failed}，重复=${state.skippedDuplicate}`);
       } else {
         idleRounds += 1;
         setStatus(`一键下载：本屏暂无新媒体。空轮次=${idleRounds}`);
@@ -433,9 +444,29 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.skippedDuplicate = 0;
     await sendMessage({ type: "SLOW_JOB_STOP" });
     setStatus("已重置，可以重新点击一键下载或开始。");
     updateUi();
+  }
+
+  async function clearDedupeHistory() {
+    const response = await sendMessage({ type: "DEDUP_CLEAR" });
+    if (response?.ok) {
+      state.dedupeCount = 0;
+      state.skippedDuplicate = 0;
+      setStatus("已清空去重记录，后续会重新下载已遇到的视频。");
+    } else {
+      setStatus(`清空去重失败：${response?.error || "未知错误"}`);
+    }
+    updateUi();
+  }
+
+  async function refreshDedupeStatus() {
+    const response = await sendMessage({ type: "SLOW_JOB_STATUS" });
+    if (response?.ok && Number.isFinite(response.result?.dedupeCount)) {
+      state.dedupeCount = response.result.dedupeCount;
+    }
   }
 
   async function processQueue(settings, runId = state.runId) {
