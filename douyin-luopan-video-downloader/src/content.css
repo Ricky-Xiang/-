@@ -80,9 +80,14 @@
 
 .luopan-video-downloader-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
   margin-top: 10px;
+}
+
+.luopan-video-downloader-button.stopping {
+  border-color: #d92d20;
+  background: #d92d20;
 }
 
 .luopan-video-downloader-button {

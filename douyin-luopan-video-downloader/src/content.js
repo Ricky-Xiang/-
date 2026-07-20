@@ -9,7 +9,7 @@
     detailTimeoutMs: 30000,
     maxItems: 50,
     autoScroll: true,
-    maxScrollRounds: 5
+    maxScrollRounds: 30
   };
 
   const state = {
@@ -26,19 +26,20 @@
     lastMessage: "就绪：先扫描或一键下载，仅下载可正常播放的视频。"
   };
 
+  injectHook();
+  window.addEventListener("message", handlePageHookMessage);
+
   if (isDetailPage()) {
     runDetailCollector();
     return;
   }
 
-  injectHook();
-  window.addEventListener("message", handlePageHookMessage);
   installInteractiveCapture();
   createUiWhenReady();
 
   function injectHook() {
     if (!document.documentElement) {
-      document.addEventListener("DOMContentLoaded", injectHook, { once: true });
+      setTimeout(injectHook, 0);
       return;
     }
     const script = document.createElement("script");
@@ -102,28 +103,15 @@
       <div class="luopan-video-downloader-body">
         <div class="luopan-video-downloader-status"></div>
         <label class="luopan-video-downloader-field">
-          <span>间隔</span>
-          <select data-setting="delay">
-            <option value="4000,8000">4-8 秒</option>
-            <option value="8000,15000">8-15 秒</option>
-            <option value="15000,30000">15-30 秒</option>
-          </select>
-        </label>
-        <label class="luopan-video-downloader-field">
-          <span>最多</span>
+          <span>下载数量</span>
           <input data-setting="maxItems" type="number" min="1" max="200" value="${DEFAULT_SETTINGS.maxItems}">
         </label>
         <label class="luopan-video-downloader-field">
-          <span>翻页</span>
-          <label><input data-setting="autoScroll" type="checkbox" checked> 自动滚动</label>
+          <span>自动翻页</span>
+          <label><input data-setting="autoScroll" type="checkbox" checked> 开启</label>
         </label>
         <div class="luopan-video-downloader-actions">
-          <button class="luopan-video-downloader-button" data-action="one-click">一键下载</button>
-          <button class="luopan-video-downloader-button" data-action="scan">扫描ID</button>
-          <button class="luopan-video-downloader-button secondary" data-action="probe">探测</button>
-          <button class="luopan-video-downloader-button" data-action="start">开始</button>
-          <button class="luopan-video-downloader-button secondary" data-action="stop">停止</button>
-          <button class="luopan-video-downloader-button secondary" data-action="reset">重置</button>
+          <button class="luopan-video-downloader-button" data-action="one-click">一键批量下载</button>
         </div>
       </div>
     `;
@@ -132,13 +120,10 @@
       state.panelOpen = false;
       render();
     });
-    panel.querySelector('[data-action="one-click"]').addEventListener("click", oneClickDownload);
-    panel.querySelector('[data-action="scan"]').addEventListener("click", () => scanPageForVideoIds(true));
-    panel.querySelector('[data-action="probe"]').addEventListener("click", probeCurrentPage);
-    panel.querySelector('[data-action="start"]').addEventListener("click", startDownload);
-    panel.querySelector('[data-action="stop"]').addEventListener("click", stopDownload);
-    panel.querySelector('[data-action="reset"]').addEventListener("click", resetDownloadState);
-    panel.querySelector('[data-setting="delay"]').addEventListener("change", persistSettings);
+    panel.querySelector('[data-action="one-click"]').addEventListener("click", () => {
+      if (state.busy) stopDownload();
+      else oneClickDownload();
+    });
     panel.querySelector('[data-setting="maxItems"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="autoScroll"]').addEventListener("change", persistSettings);
 
@@ -149,15 +134,14 @@
   function updateUi() {
     const status = document.querySelector(".luopan-video-downloader-status");
     if (status) {
-      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}`;
+      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已处理=${state.started}，成功=${state.completed}，跳过=${state.failed}`;
     }
 
-    const startButton = document.querySelector('[data-action="start"]');
     const oneClickButton = document.querySelector('[data-action="one-click"]');
-    const stopButton = document.querySelector('[data-action="stop"]');
-    if (startButton) startButton.disabled = state.busy;
-    if (oneClickButton) oneClickButton.disabled = state.busy;
-    if (stopButton) stopButton.disabled = !state.busy;
+    if (oneClickButton) {
+      oneClickButton.textContent = state.busy ? "停止下载" : "一键批量下载";
+      oneClickButton.classList.toggle("stopping", state.busy);
+    }
   }
 
   function setStatus(message) {
@@ -168,10 +152,8 @@
   async function restoreSettings() {
     const result = await chrome.storage.local.get(STORE_KEY).catch(() => ({}));
     const settings = { ...DEFAULT_SETTINGS, ...(result[STORE_KEY] || {}) };
-    const delay = document.querySelector('[data-setting="delay"]');
     const maxItems = document.querySelector('[data-setting="maxItems"]');
     const autoScroll = document.querySelector('[data-setting="autoScroll"]');
-    if (delay) delay.value = `${settings.delayMinMs},${settings.delayMaxMs}`;
     if (maxItems) maxItems.value = String(settings.maxItems);
     if (autoScroll) autoScroll.checked = Boolean(settings.autoScroll);
     updateUi();
@@ -269,6 +251,7 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
+    state.processedMediaKeys.clear();
     setStatus("一键下载：正在准备页面并触发播放器...");
 
     try {
@@ -289,9 +272,7 @@
 
       let videos = getMediaVideos(settings.maxItems - state.started);
       if (!videos.length) {
-        const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
-        await triggerFirstPlayableVideo(runId);
-        await waitForMediaReady(12000, beforeMedia, runId);
+        await triggerVisibleVideoBatch(settings.maxItems - state.started, runId);
         videos = getMediaVideos(settings.maxItems - state.started);
       }
 
@@ -309,11 +290,16 @@
         setStatus(`一键下载：本屏暂无新媒体。空轮次=${idleRounds}`);
       }
 
-      if (!settings.autoScroll || scrollRound >= settings.maxScrollRounds || idleRounds >= 2 || state.started >= settings.maxItems) break;
+      if (!settings.autoScroll || scrollRound >= settings.maxScrollRounds || idleRounds >= 5 || state.started >= settings.maxItems) break;
       scrollRound += 1;
       closeVisiblePlayerOverlay();
-      scrollRankList();
-      await delay(randomInt(settings.delayMinMs, settings.delayMaxMs));
+      const advanced = await advanceRankList(runId);
+      clearVisibleProbeMarks();
+      await delay(600);
+      if (!advanced) {
+        idleRounds += 1;
+        setStatus(`一键下载：尝试翻页但列表未明显变化。空轮次=${idleRounds}`);
+      }
     }
 
     if (!state.stop && runId === state.runId) {
@@ -373,22 +359,40 @@
     if (!url) return "";
     try {
       const parsed = new URL(url);
-      return `url:${parsed.origin}${parsed.pathname}`;
+      parsed.hash = "";
+      return `url:${parsed.href}`;
     } catch {
       return `url:${url}`;
     }
   }
 
   function closeVisiblePlayerOverlay() {
-    const closeCandidates = Array.from(document.querySelectorAll("button, [role='button'], span, div"))
+    const closeSelectors = [
+      "[aria-label*='关闭']",
+      "[aria-label*='close' i]",
+      "[title*='关闭']",
+      "[title*='close' i]",
+      "[class*='close' i]",
+      "[class*='modal-close' i]",
+      "[class*='drawer-close' i]",
+      "[class*='DialogClose' i]",
+      "[class*='ModalClose' i]",
+      "button",
+      "[role='button']",
+      "span",
+      "div"
+    ];
+    const closeCandidates = Array.from(document.querySelectorAll(closeSelectors.join(",")))
       .filter((element) => !isInsideDownloader(element))
       .filter(isVisible)
       .filter((element) => {
         const text = cleanText(element.innerText || element.getAttribute("aria-label") || element.title || "");
         const className = String(element.className || "");
         const rect = element.getBoundingClientRect();
-        const looksLikeClose = /关闭|收起|close|modal-close|drawer-close/i.test(`${text} ${className}`);
-        const looksLikeTopRightIcon = rect.width <= 60 && rect.height <= 60 && rect.left > window.innerWidth * 0.55 && rect.top < window.innerHeight * 0.45;
+        const style = getComputedStyle(element);
+        const looksLikeClose = /关闭|收起|close|modal-close|drawer-close|dialog-close/i.test(`${text} ${className} ${element.getAttribute("aria-label") || ""} ${element.title || ""}`);
+        const isOverlayLayer = style.position === "fixed" || Boolean(element.closest("[role='dialog'],[class*='modal' i],[class*='drawer' i],[class*='popup' i]"));
+        const looksLikeTopRightIcon = isOverlayLayer && rect.width <= 60 && rect.height <= 60 && rect.left > window.innerWidth * 0.55 && rect.top < window.innerHeight * 0.45;
         return looksLikeClose || looksLikeTopRightIcon;
       })
       .sort((a, b) => scoreCloseCandidate(b) - scoreCloseCandidate(a));
@@ -398,26 +402,38 @@
       return true;
     }
 
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
-    document.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+    dispatchEscapeKey();
     return false;
   }
 
   function scoreCloseCandidate(element) {
     const text = cleanText(element.innerText || element.getAttribute("aria-label") || element.title || "");
+    const className = String(element.className || "");
     const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
     let score = 0;
-    if (/关闭|close/i.test(text)) score += 20;
+    if (/关闭|close/i.test(text)) score += 30;
+    if (/close|modal|drawer|dialog/i.test(className)) score += 20;
+    if (style.position === "fixed") score += 8;
+    if (element.closest("[role='dialog'],[class*='modal' i],[class*='drawer' i],[class*='popup' i]")) score += 8;
     if (rect.left > window.innerWidth * 0.7) score += 5;
     if (rect.top < window.innerHeight * 0.35) score += 5;
     if (rect.width <= 40 && rect.height <= 40) score += 3;
     return score;
   }
 
+  function dispatchEscapeKey() {
+    const eventInit = { key: "Escape", code: "Escape", keyCode: 27, which: 27, bubbles: true, cancelable: true };
+    for (const target of [document.activeElement, document.body, document, window].filter(Boolean)) {
+      target.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+      target.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+    }
+  }
+
   async function triggerFirstPlayableVideo(runId = state.runId) {
     const candidates = collectClickableVideoCandidates()
       .filter((element) => !element.getAttribute("data-luopan-oneclick-probed"))
-      .slice(0, 8);
+      .slice(0, 2);
     if (!candidates.length) {
       setStatus("一键下载：没有找到可点击的视频入口。");
       return false;
@@ -442,6 +458,60 @@
         await waitForUrl(beforeUrl, 3500);
       }
       await delay(500);
+    }
+    return false;
+  }
+
+  async function triggerVisibleVideoBatch(limit, runId = state.runId) {
+    const candidates = collectClickableVideoCandidates()
+      .filter((element) => !element.getAttribute("data-luopan-oneclick-probed"))
+      .slice(0, Math.min(12, Math.max(1, limit)));
+    if (!candidates.length) return 0;
+
+    let captured = 0;
+    for (const [index, candidate] of candidates.entries()) {
+      if (state.stop || runId !== state.runId) break;
+      candidate.setAttribute("data-luopan-oneclick-probed", "true");
+      const beforeKeys = new Set(state.mediaItems.keys());
+      const row = findRankRow(candidate);
+      const rowText = cleanText(row?.innerText || "");
+      const meta = {
+        title: extractTitle(rowText),
+        author: extractAuthor(rowText),
+        rank: extractRank(rowText, state.started + captured + 1)
+      };
+
+      dispatchRealClick(candidate);
+      setStatus(`批量采集：本屏 ${index + 1}/${candidates.length}，已捕获 ${captured} 个...`);
+      await waitForNewCapturedMedia(beforeKeys, index === 0 ? 2500 : 1600, runId);
+
+      for (const [url, item] of state.mediaItems.entries()) {
+        if (beforeKeys.has(url)) continue;
+        state.mediaItems.set(url, {
+          ...item,
+          title: meta.title || item.title,
+          author: meta.author || item.author,
+          rank: meta.rank || item.rank
+        });
+        captured += 1;
+      }
+      closeVisiblePlayerOverlay();
+      await delay(180);
+    }
+    return captured;
+  }
+
+  async function waitForNewCapturedMedia(beforeKeys, timeoutMs, runId) {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (state.stop || runId !== state.runId) return false;
+      if ([...state.mediaItems.keys()].some((key) => !beforeKeys.has(key))) return true;
+      const visible = collectVisiblePageVideos();
+      if (visible.length) {
+        addMediaItems(visible, "visible-batch");
+        if ([...state.mediaItems.keys()].some((key) => !beforeKeys.has(key))) return true;
+      }
+      await delay(200);
     }
     return false;
   }
@@ -746,6 +816,7 @@
           rank: state.mediaItems.size + 1,
           title: raw.title || document.title || `media_${state.mediaItems.size + 1}`,
           author: raw.author || "",
+          videoId: raw.videoId || raw.id || "",
           url,
           sourceUrl: url,
           detailUrl: location.href,
@@ -969,13 +1040,13 @@
   function createDirectDetailUi(meta) {
     createUi();
     setStatus(`检测到详情页。视频ID=${meta.videoId || "无"}。点击“下载当前”即可下载当前视频。`);
-    const startButton = document.querySelector('[data-action="start"]');
-    if (startButton) {
-      startButton.textContent = "下载当前";
-      startButton.onclick = () => startCurrentDetailDownload(meta);
+    const downloadButton = document.querySelector('[data-action="one-click"]');
+    if (downloadButton) {
+      const directButton = downloadButton.cloneNode(true);
+      directButton.textContent = "下载当前视频";
+      directButton.onclick = () => startCurrentDetailDownload(meta);
+      downloadButton.replaceWith(directButton);
     }
-    const scanButton = document.querySelector('[data-action="scan"]');
-    if (scanButton) scanButton.disabled = true;
   }
 
   async function startCurrentDetailDownload(meta) {
@@ -1049,6 +1120,8 @@
       clickLikelyPlayer();
       const video = getBestVideoSource();
       if (video) return video;
+      const captured = collectCapturedMediaVideos().find((item) => isLikelyVideoUrl(item.url));
+      if (captured) return { url: captured.url, source: captured.source };
       await delay(1500);
     }
     return null;
@@ -1114,16 +1187,51 @@
     return element.closest("tr") || element.parentElement;
   }
 
-  function scrollRankList() {
+  async function advanceRankList(runId = state.runId) {
+    const before = getRankViewportSignature();
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (state.stop || runId !== state.runId) return false;
+      scrollRankList(attempt);
+      await delay(1000 + attempt * 300);
+      scanPageForVideoIds(false);
+      collectVisibleDetailLinks();
+      const after = getRankViewportSignature();
+      if (after.key && after.key !== before.key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function scrollRankList(attempt = 0) {
     const scroller = findBestScroller();
+    const candidates = collectClickableVideoCandidates()
+      .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    const lastRow = candidates.length ? findRankRow(candidates[candidates.length - 1]) : null;
+    const stepRatio = attempt >= 2 ? 1.35 : 0.9;
     if (!scroller) {
-      window.scrollBy({ top: Math.max(600, window.innerHeight * 0.8), behavior: "smooth" });
+      window.scrollBy({ top: Math.max(600, window.innerHeight * stepRatio), behavior: "smooth" });
+      dispatchPageAdvanceKeys();
       return;
     }
-    scroller.scrollTop = Math.min(scroller.scrollHeight, scroller.scrollTop + Math.max(600, scroller.clientHeight * 0.8));
+    if (lastRow && attempt === 0) {
+      lastRow.scrollIntoView({ block: "start", behavior: "instant" });
+    }
+    const before = scroller.scrollTop;
+    const step = Math.max(600, scroller.clientHeight * stepRatio);
+    scroller.scrollTop = Math.min(scroller.scrollHeight - scroller.clientHeight, scroller.scrollTop + step);
+    scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    dispatchWheel(scroller, step);
+    if (scroller.scrollTop === before && scroller !== document.scrollingElement) {
+      window.scrollBy({ top: step, behavior: "smooth" });
+    }
+    if (scroller.scrollTop === before || attempt >= 2) dispatchPageAdvanceKeys();
   }
 
   function findBestScroller() {
+    const candidateScroller = findScrollerFromVideoCards();
+    if (candidateScroller) return candidateScroller;
+
     const nodes = [document.scrollingElement, ...document.querySelectorAll("*")].filter(Boolean);
     let best = null;
     let bestScore = 0;
@@ -1132,14 +1240,94 @@
       const canScroll = node.scrollHeight > node.clientHeight + 120;
       const overflowAllowsScroll = !style || /(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`);
       if (!canScroll || !overflowAllowsScroll) continue;
+      if (node.closest?.("#luopan-video-downloader-root")) continue;
+      const rect = node === document.scrollingElement ? { width: window.innerWidth, height: window.innerHeight, top: 0, bottom: window.innerHeight } : node.getBoundingClientRect();
+      if (rect.width < 320 || rect.height < 160 || rect.bottom < 80 || rect.top > window.innerHeight - 80) continue;
       const text = cleanText(node.innerText || "");
-      const score = node.clientHeight + (/TOP\s*\d+|video|rank|观看|引流|详情/i.test(text) ? 2000 : 0);
+      const className = String(node.className || "");
+      const id = String(node.id || "");
+      let score = node.clientHeight + Math.min(1200, node.scrollHeight - node.clientHeight);
+      if (/TOP\s*\d+|video|rank|观看|引流|详情|榜单|短视频/i.test(text)) score += 2500;
+      if (/table|list|rank|scroll|body|content|virtual|virtuoso/i.test(`${className} ${id}`)) score += 1200;
+      if (rect.top >= 0 && rect.top < window.innerHeight * 0.45) score += 400;
+      if (style?.position === "fixed" && !/table|list|rank|scroll|drawer|modal/i.test(`${className} ${id}`)) score -= 1000;
       if (score > bestScore) {
         best = node;
         bestScore = score;
       }
     }
     return best || document.scrollingElement;
+  }
+
+  function findScrollerFromVideoCards() {
+    const candidates = collectClickableVideoCandidates().slice(0, 12);
+    const scores = new Map();
+    for (const candidate of candidates) {
+      let node = candidate.parentElement;
+      for (let depth = 0; node && depth < 12; depth += 1, node = node.parentElement) {
+        if (node.closest?.("#luopan-video-downloader-root")) continue;
+        const style = getComputedStyle(node);
+        const canScroll = node.scrollHeight > node.clientHeight + 80;
+        const allowsScroll = /(auto|scroll|overlay)/.test(`${style.overflowY} ${style.overflow}`);
+        if (!canScroll || !allowsScroll) continue;
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 320 || rect.height < 160) continue;
+        scores.set(node, (scores.get(node) || 0) + 1);
+      }
+    }
+    return [...scores.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].clientHeight - b[0].clientHeight)[0]?.[0] || null;
+  }
+
+  function getRankViewportSignature() {
+    const scroller = findBestScroller();
+    const scrollTop = Math.round(scroller?.scrollTop || window.scrollY || document.documentElement.scrollTop || 0);
+    const nodes = collectClickableVideoCandidates().slice(0, 8);
+    const key = nodes.map((element) => {
+      const row = findRankRow(element);
+      const rect = element.getBoundingClientRect();
+      return cleanText(row?.innerText || element.innerText || element.alt || "")
+        .slice(0, 80) + `@${Math.round(rect.top)}`;
+    }).join("|");
+    return {
+      key,
+      scrollTop,
+      mediaCount: collectVisiblePageVideos().length + collectCapturedMediaVideos().length
+    };
+  }
+
+  function clearVisibleProbeMarks() {
+    for (const element of document.querySelectorAll("[data-luopan-oneclick-probed], [data-luopan-dl-probed]")) {
+      if (isVisible(element)) {
+        element.removeAttribute("data-luopan-oneclick-probed");
+        element.removeAttribute("data-luopan-dl-probed");
+      }
+    }
+  }
+
+  function dispatchWheel(target, deltaY) {
+    const rect = target === document.scrollingElement
+      ? { left: window.innerWidth / 2, top: window.innerHeight / 2 }
+      : target.getBoundingClientRect();
+    const x = Math.max(1, Math.min(window.innerWidth - 1, rect.left + Math.min(40, Math.max(1, (rect.width || 80) / 2))));
+    const y = Math.max(1, Math.min(window.innerHeight - 1, rect.top + Math.min(40, Math.max(1, (rect.height || 80) / 2))));
+    target.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      deltaY,
+      deltaMode: 0,
+      clientX: x,
+      clientY: y,
+      view: window
+    }));
+  }
+
+  function dispatchPageAdvanceKeys() {
+    const eventInit = { key: "PageDown", code: "PageDown", keyCode: 34, which: 34, bubbles: true, cancelable: true };
+    for (const target of [document.activeElement, document.body, document, window].filter(Boolean)) {
+      target.dispatchEvent(new KeyboardEvent("keydown", eventInit));
+      target.dispatchEvent(new KeyboardEvent("keyup", eventInit));
+    }
   }
 
   function makeFolderName() {

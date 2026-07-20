@@ -4,7 +4,7 @@
 
   const EVENT_NAME = "LUOPAN_VIDEO_CANDIDATES";
   const URL_RE = /https?:\/\/[^\s"'<>\\]+/g;
-  const RESPONSE_HINT_RE = /\.(mp4|m3u8|mov|webm)(\?|$)|playwm|play_addr|download_addr|video_id|aweme_id|vid=|douyinvod|aweme\/v1\/play/i;
+  const RESPONSE_HINT_RE = /\.(mp4|m3u8|mov|webm)(\?|$)|playwm|play_addr|download_addr|main_url|backup_url|video_url|video_id|aweme_id|vid=|douyinvod|aweme\/v1\/play/i;
   const MEDIA_FILE_RE = /\.(mp4|m3u8|mov|webm)(\?|#|$)/i;
   const BAD_ASSET_RE = /\.(png|jpe?g|webp|gif|svg|ico|css|js|html?|woff2?|ttf)(\?|#|$)|tplv-[^/]+-image|avatar|cover|poster|image\.image/i;
   const TITLE_KEYS = new Set(["title", "desc", "description", "video_name", "item_title", "text"]);
@@ -22,7 +22,7 @@
 
     window.fetch = async function patchedFetch(...args) {
       const response = await originalFetch.apply(this, args);
-      inspectResponse(response.clone(), urlFromFetchArgs(args));
+      inspectResponse(response.clone(), urlFromFetchArgs(args) || response.url || "");
       return response;
     };
   }
@@ -39,6 +39,12 @@
       this.addEventListener("load", () => {
         const requestUrl = this.__luopanVideoHookUrl || "";
         const contentType = this.getResponseHeader("content-type") || "";
+        const responseUrl = this.responseURL || requestUrl;
+        const directUrls = dedupe([requestUrl, responseUrl].filter((url) => isLikelyVideoUrl(url, [])));
+        if (directUrls.length) {
+          emitCandidates(directUrls.map((url) => ({ urls: [url] })), requestUrl || responseUrl);
+          return;
+        }
         if (!isLikelyUseful(requestUrl, contentType)) return;
         const text = typeof this.responseText === "string" ? this.responseText : "";
         inspectText(text, requestUrl);
@@ -48,8 +54,15 @@
   }
 
   async function inspectResponse(response, requestUrl) {
+    const responseUrl = response.url || requestUrl;
     const contentType = response.headers.get("content-type") || "";
+    const directUrls = dedupe([requestUrl, responseUrl].filter((url) => isLikelyVideoUrl(url, [])));
+    if (directUrls.length) {
+      emitCandidates(directUrls.map((url) => ({ urls: [url] })), requestUrl || responseUrl);
+      return;
+    }
     if (!isLikelyUseful(requestUrl, contentType)) return;
+    if (/video\/|audio\/|octet-stream|mpegurl|application\/vnd\.apple\.mpegurl/i.test(contentType)) return;
 
     try {
       const text = await response.text();
@@ -70,8 +83,12 @@
     }
 
     const candidates = parsed ? extractFromJson(parsed) : extractUrlsFromText(text).map((url) => ({ urls: [url] }));
-    const normalized = normalizeCandidates(candidates, requestUrl);
     const rankItems = parsed ? extractRankItems(parsed, requestUrl) : [];
+    emitCandidates(candidates, requestUrl, rankItems);
+  }
+
+  function emitCandidates(candidates, requestUrl, rankItems = []) {
+    const normalized = normalizeCandidates(candidates, requestUrl);
     if (!normalized.length && !rankItems.length) return;
 
     window.postMessage(
@@ -281,7 +298,7 @@
 
   function isLikelyUseful(url, contentType) {
     const haystack = `${url} ${contentType}`;
-    return /json|text|rank|video|aweme|item|compass|luopan|live/i.test(haystack);
+    return /json|text|rank|video|aweme|item|compass|luopan|live|douyinvod|m3u8|mp4|mpegurl/i.test(haystack);
   }
 
   function dedupe(values) {

@@ -157,11 +157,11 @@ async function openDetailTab(payload = {}) {
     url = new URL(meta.detailUrl);
   } else {
     const baseUrl = payload.baseUrl || "https://compass.jinritemai.com";
-    url = new URL("/shop/chance/rank-video", baseUrl);
+    url = new URL("/shop/chance/rank-video/detail", baseUrl);
     url.searchParams.set("video_id", meta.videoId);
     url.searchParams.set("video_shop_id", meta.shopId || "0");
     url.searchParams.set("source", "shipinxiaoliangbang");
-    url.searchParams.set("from_page", "/shop/chance/rank-video/detail");
+    url.searchParams.set("from_page", "/shop/chance/video-rank");
   }
 
   const tab = await chromeCreateTab({ url: url.toString(), active: false });
@@ -236,38 +236,48 @@ async function downloadBatch(payload = {}) {
   const folder = sanitizeDownloadPath(payload.folder || DEFAULT_FOLDER);
   const started = [];
   const failed = [];
+  const concurrency = Math.min(4, Math.max(1, videos.length));
+  let cursor = 0;
 
-  for (const [index, video] of videos.entries()) {
-    const url = pickDownloadUrl(video);
-    if (!url) {
-      failed.push({ index, reason: "no downloadable video URL", video });
-      continue;
-    }
+  async function worker() {
+    while (cursor < videos.length) {
+      const index = cursor;
+      cursor += 1;
+      const video = videos[index];
+      const url = pickDownloadUrl(video);
+      if (!url) {
+        failed.push({ index, reason: "no downloadable video URL", video });
+        continue;
+      }
 
-    const validation = await validateDownloadUrl(url);
-    if (!validation.ok) {
-      failed.push({ index, reason: validation.reason, url, video });
-      continue;
-    }
+      const validation = await validateDownloadUrl(url);
+      if (!validation.ok) {
+        failed.push({ index, reason: validation.reason, url, video });
+        continue;
+      }
 
-    const ext = extensionFromUrl(validation.finalUrl || url, validation.contentType);
-    const rankPrefix = video.rank ? `${String(video.rank).padStart(3, "0")}_` : `${String(index + 1).padStart(3, "0")}_`;
-    const title = sanitizePathSegment(video.title || video.author || video.videoId || `video_${index + 1}`);
-    const filename = `${folder}/${rankPrefix}${title}.${ext}`;
+      const ext = extensionFromUrl(validation.finalUrl || url, validation.contentType);
+      const rankPrefix = video.rank ? `${String(video.rank).padStart(3, "0")}_` : `${String(index + 1).padStart(3, "0")}_`;
+      const title = sanitizePathSegment(video.title || video.author || video.videoId || `video_${index + 1}`);
+      const filename = `${folder}/${rankPrefix}${title}.${ext}`;
 
-    try {
-      const downloadId = await chromeDownload({
-        url: validation.finalUrl || url,
-        filename,
-        conflictAction: "uniquify",
-        saveAs: false
-      });
-      started.push({ index, downloadId, filename, url });
-      await delay(250);
-    } catch (error) {
-      failed.push({ index, reason: String(error?.message || error), video });
+      try {
+        const downloadId = await chromeDownload({
+          url: validation.finalUrl || url,
+          filename,
+          conflictAction: "uniquify",
+          saveAs: false
+        });
+        started.push({ index, downloadId, filename, url });
+      } catch (error) {
+        failed.push({ index, reason: String(error?.message || error), video });
+      }
     }
   }
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  started.sort((a, b) => a.index - b.index);
+  failed.sort((a, b) => a.index - b.index);
 
   return { requested: videos.length, started, failed };
 }
@@ -309,12 +319,15 @@ async function validateDownloadUrl(url) {
     return { ok: false, reason: "URL does not look like video media" };
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
   try {
     const response = await fetch(url, {
       method: "HEAD",
       redirect: "follow",
       cache: "no-store",
-      credentials: "include"
+      credentials: "include",
+      signal: controller.signal
     });
     const contentType = (response.headers.get("content-type") || "").toLowerCase();
     const finalUrl = response.url || url;
@@ -330,6 +343,8 @@ async function validateDownloadUrl(url) {
     return { ok: true, contentType, finalUrl };
   } catch {
     return { ok: true, contentType: "", finalUrl: url };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
