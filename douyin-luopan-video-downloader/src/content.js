@@ -19,7 +19,7 @@
     started: 0,
     completed: 0,
     failed: 0,
-    lastMessage: "Ready. Scan first, then download playable detail videos only."
+    lastMessage: "就绪：先扫描或一键下载，仅下载可正常播放的视频。"
   };
 
   if (isDetailPage()) {
@@ -79,7 +79,7 @@
     if (!state.panelOpen) {
       const mini = document.createElement("button");
       mini.className = "luopan-video-downloader-mini";
-      mini.textContent = state.busy ? `Downloading ${state.completed}/${state.started}` : "Luopan DL";
+      mini.textContent = state.busy ? `下载中 ${state.completed}/${state.started}` : "罗盘下载";
       mini.addEventListener("click", () => {
         state.panelOpen = true;
         render();
@@ -92,29 +92,30 @@
     panel.className = "luopan-video-downloader-panel";
     panel.innerHTML = `
       <div class="luopan-video-downloader-header">
-        <span>Luopan Video Download</span>
-        <button class="luopan-video-downloader-close" title="Collapse">x</button>
+        <span>罗盘视频下载</span>
+        <button class="luopan-video-downloader-close" title="收起">x</button>
       </div>
       <div class="luopan-video-downloader-body">
         <div class="luopan-video-downloader-status"></div>
         <label class="luopan-video-downloader-field">
-          <span>Delay</span>
+          <span>间隔</span>
           <select data-setting="delay">
-            <option value="4000,8000">4-8 sec</option>
-            <option value="8000,15000">8-15 sec</option>
-            <option value="15000,30000">15-30 sec</option>
+            <option value="4000,8000">4-8 秒</option>
+            <option value="8000,15000">8-15 秒</option>
+            <option value="15000,30000">15-30 秒</option>
           </select>
         </label>
         <label class="luopan-video-downloader-field">
-          <span>Max</span>
+          <span>最多</span>
           <input data-setting="maxItems" type="number" min="1" max="200" value="${DEFAULT_SETTINGS.maxItems}">
         </label>
         <div class="luopan-video-downloader-actions">
-          <button class="luopan-video-downloader-button" data-action="one-click">One Click</button>
-          <button class="luopan-video-downloader-button" data-action="scan">Scan IDs</button>
-          <button class="luopan-video-downloader-button secondary" data-action="probe">Probe</button>
-          <button class="luopan-video-downloader-button" data-action="start">Start</button>
-          <button class="luopan-video-downloader-button secondary" data-action="stop">Stop</button>
+          <button class="luopan-video-downloader-button" data-action="one-click">一键下载</button>
+          <button class="luopan-video-downloader-button" data-action="scan">扫描ID</button>
+          <button class="luopan-video-downloader-button secondary" data-action="probe">探测</button>
+          <button class="luopan-video-downloader-button" data-action="start">开始</button>
+          <button class="luopan-video-downloader-button secondary" data-action="stop">停止</button>
+          <button class="luopan-video-downloader-button secondary" data-action="reset">重置</button>
         </div>
       </div>
     `;
@@ -128,6 +129,7 @@
     panel.querySelector('[data-action="probe"]').addEventListener("click", probeCurrentPage);
     panel.querySelector('[data-action="start"]').addEventListener("click", startDownload);
     panel.querySelector('[data-action="stop"]').addEventListener("click", stopDownload);
+    panel.querySelector('[data-action="reset"]').addEventListener("click", resetDownloadState);
     panel.querySelector('[data-setting="delay"]').addEventListener("change", persistSettings);
     panel.querySelector('[data-setting="maxItems"]').addEventListener("change", persistSettings);
 
@@ -138,7 +140,7 @@
   function updateUi() {
     const status = document.querySelector(".luopan-video-downloader-status");
     if (status) {
-      status.textContent = `${state.lastMessage}\nids=${state.rankItems.size}, media=${state.mediaItems.size}, opened=${state.started}, ok=${state.completed}, skipped=${state.failed}`;
+      status.textContent = `${state.lastMessage}\nID=${state.rankItems.size}，媒体=${state.mediaItems.size}，已打开=${state.started}，成功=${state.completed}，跳过=${state.failed}`;
     }
 
     const startButton = document.querySelector('[data-action="start"]');
@@ -194,7 +196,7 @@
       state.started = firstPassVideos.length;
       state.completed = 0;
       state.failed = 0;
-      setStatus(`Found ${firstPassVideos.length} media URL(s). Downloading directly...`);
+      setStatus(`发现 ${firstPassVideos.length} 个媒体地址，正在直接提交下载...`);
       try {
         const result = await sendMessage({
           type: "DL_VIDEO_BATCH",
@@ -207,7 +209,7 @@
         const failed = result?.result?.failed?.length || 0;
         state.completed = started;
         state.failed = failed;
-        setStatus(`Direct visible video download submitted. ok=${started}, skipped=${failed}`);
+        setStatus(`直接下载已提交。成功=${started}，跳过=${failed}`);
       } finally {
         state.busy = false;
         updateUi();
@@ -220,7 +222,7 @@
       payload: { folder: makeFolderName(), settings, sourceUrl: location.href, pageTitle: document.title }
     });
     if (!startResponse?.ok) {
-      setStatus(`Start failed: ${startResponse?.error || "unknown"}`);
+      setStatus(`启动失败：${startResponse?.error || "未知错误"}`);
       return;
     }
 
@@ -250,7 +252,7 @@
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
-    setStatus("One Click: preparing page and triggering player...");
+    setStatus("一键下载：正在准备页面并触发播放器...");
 
     try {
       scanPageForVideoIds(false);
@@ -262,7 +264,7 @@
         mediaCount = await waitForMediaReady(15000);
       }
 
-      setStatus(`One Click: media ready=${mediaCount}. Starting download...`);
+      setStatus(`一键下载：已发现媒体=${mediaCount}，开始下载...`);
     } finally {
       state.busy = false;
       updateUi();
@@ -274,7 +276,7 @@
   async function triggerFirstPlayableVideo() {
     const candidates = collectClickableVideoCandidates().slice(0, 8);
     if (!candidates.length) {
-      setStatus("One Click: no clickable video candidate found.");
+      setStatus("一键下载：没有找到可点击的视频入口。");
       return false;
     }
 
@@ -283,7 +285,7 @@
       const beforeUrl = location.href;
       const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
       dispatchRealClick(candidate);
-      setStatus("One Click: clicked a visible video candidate, waiting for media...");
+      setStatus("一键下载：已点击一个可见视频入口，等待媒体地址...");
 
       const ready = await waitForMediaReady(5000, beforeMedia);
       if (ready > beforeMedia) return true;
@@ -316,8 +318,19 @@
 
   async function stopDownload() {
     state.stop = true;
-    setStatus("Stop requested.");
+    setStatus("已收到停止指令。");
     await sendMessage({ type: "SLOW_JOB_STOP" });
+  }
+
+  async function resetDownloadState() {
+    state.busy = false;
+    state.stop = false;
+    state.started = 0;
+    state.completed = 0;
+    state.failed = 0;
+    await sendMessage({ type: "SLOW_JOB_STOP" });
+    setStatus("已重置，可以重新点击一键下载或开始。");
+    updateUi();
   }
 
   async function processQueue(settings) {
@@ -358,13 +371,13 @@
           source: item.source || ""
         };
 
-        setStatus(`Opening detail ${state.started}/${settings.maxItems}: ${meta.title || meta.videoId}`);
+        setStatus(`正在打开详情 ${state.started}/${settings.maxItems}：${meta.title || meta.videoId}`);
         const before = await getJobStatus();
         await sendMessage({ type: "SLOW_JOB_EXPECT_DETAIL", payload: { meta } });
         const openResult = await sendMessage({ type: "SLOW_OPEN_DETAIL_TAB", payload: { meta, baseUrl: location.origin } });
         if (!openResult?.ok) {
           state.failed += 1;
-          setStatus(`Open detail failed: ${openResult?.error || "unknown"}`);
+          setStatus(`打开详情失败：${openResult?.error || "未知错误"}`);
           continue;
         }
 
@@ -372,11 +385,11 @@
         const after = await getJobStatus();
         state.completed = after.completed || state.completed;
         state.failed = after.failed || state.failed;
-        setStatus(`Processed ${state.started}. ok=${state.completed}, skipped=${state.failed}`);
+        setStatus(`已处理 ${state.started} 条。成功=${state.completed}，跳过=${state.failed}`);
         await delay(randomInt(settings.delayMinMs, settings.delayMaxMs));
       }
     }
-    setStatus(state.stop ? "Stopped." : "Done. No more recognizable video_id items.");
+    setStatus(state.stop ? "已停止。" : "处理结束：没有更多可识别的视频。");
   }
 
   async function harvestVideoIdsByClicking(limit) {
@@ -467,7 +480,7 @@
     if (/查看详情|详情/i.test(text)) score += 8;
     if (rect.width >= 60 && rect.height >= 60) score += 4;
     if (rect.top > 0 && rect.bottom < window.innerHeight) score += 2;
-    if (/下载|Start|Scan|Stop|Luopan/i.test(text)) score -= 100;
+    if (/下载|开始|扫描|停止|重置|探测|Start|Scan|Stop|Luopan/i.test(text)) score -= 100;
     return score;
   }
 
@@ -548,7 +561,7 @@
     const added = addItems(items, "react-scan");
     if (showStatus) {
       const visibleVideos = collectVisiblePageVideos();
-      setStatus(`Scan complete. ids added=${added}, ids total=${state.rankItems.size}, media=${state.mediaItems.size}, visible video src=${visibleVideos.length}.`);
+      setStatus(`扫描完成：新增ID=${added}，累计ID=${state.rankItems.size}，媒体=${state.mediaItems.size}，可见视频源=${visibleVideos.length}。`);
     }
     return added;
   }
@@ -564,11 +577,11 @@
     const currentVideoId = new URL(location.href).searchParams.get("video_id") || "";
 
     setStatus([
-      `Probe: url video_id=${currentVideoId || "none"}`,
-      `dom video=${domVideoCount}, source=${sourceCount}, iframe=${iframeCount}`,
-      `visible video src=${visibleVideos.length}, captured media=${state.mediaItems.size}`,
-      `detail links=${detailLinkCount}, clickable candidates=${clickableCount}`,
-      `react ids added=${reactAdded}, ids total=${state.rankItems.size}`
+      `探测：URL视频ID=${currentVideoId || "无"}`,
+      `DOM视频=${domVideoCount}，source=${sourceCount}，iframe=${iframeCount}`,
+      `可见视频源=${visibleVideos.length}，已捕获媒体=${state.mediaItems.size}`,
+      `详情链接=${detailLinkCount}，可点击入口=${clickableCount}`,
+      `React新增ID=${reactAdded}，累计ID=${state.rankItems.size}`
     ].join(" | "));
   }
 
@@ -804,10 +817,10 @@
 
   function createDirectDetailUi(meta) {
     createUi();
-    setStatus(`Detail page detected. video_id=${meta.videoId || "none"}. Click Start to download current video.`);
+    setStatus(`检测到详情页。视频ID=${meta.videoId || "无"}。点击“下载当前”即可下载当前视频。`);
     const startButton = document.querySelector('[data-action="start"]');
     if (startButton) {
-      startButton.textContent = "Download Current";
+      startButton.textContent = "下载当前";
       startButton.onclick = () => startCurrentDetailDownload(meta);
     }
     const scanButton = document.querySelector('[data-action="scan"]');
@@ -817,7 +830,7 @@
   async function startCurrentDetailDownload(meta) {
     if (state.busy) return;
     if (!meta.videoId) {
-      setStatus("No video_id in current URL.");
+      setStatus("当前 URL 没有 video_id。");
       return;
     }
     state.busy = true;
@@ -846,7 +859,7 @@
       const after = await getJobStatus();
       state.completed = after.completed || 0;
       state.failed = after.failed || 0;
-      setStatus(`Current detail processed. ok=${state.completed}, skipped=${state.failed}`);
+      setStatus(`当前详情页处理完成。成功=${state.completed}，跳过=${state.failed}`);
     } finally {
       await sendMessage({ type: "SLOW_JOB_STOP" });
       state.busy = false;
