@@ -257,7 +257,9 @@
     try {
       await runOneClickRounds(settings, runId);
     } finally {
-      state.busy = false;
+      if (runId === state.runId) {
+        state.busy = false;
+      }
       updateUi();
     }
   }
@@ -1189,6 +1191,19 @@
 
   async function advanceRankList(runId = state.runId) {
     const before = getRankViewportSignature();
+    const nextPageButton = findNextPageButton();
+    if (nextPageButton) {
+      dispatchRealClick(nextPageButton);
+      setStatus("翻页：已点击右下角下一页，等待榜单更新...");
+      for (let waitRound = 0; waitRound < 10; waitRound += 1) {
+        if (state.stop || runId !== state.runId) return false;
+        await delay(400);
+        const afterClick = getRankViewportSignature();
+        if (afterClick.page !== before.page || (afterClick.key && afterClick.key !== before.key)) return true;
+      }
+      return false;
+    }
+
     for (let attempt = 0; attempt < 6; attempt += 1) {
       if (state.stop || runId !== state.runId) return false;
       scrollRankList(attempt);
@@ -1201,6 +1216,58 @@
       }
     }
     return false;
+  }
+
+  function findNextPageButton() {
+    const explicitSelectors = [
+      "button[aria-label*='下一页']",
+      "button[aria-label*='next' i]",
+      "button[title*='下一页']",
+      "button[title*='next' i]",
+      "[class*='pagination-next' i]",
+      "[class*='pager-next' i]",
+      "li[class*='next' i] button",
+      "li[class*='next' i]"
+    ];
+    for (const selector of explicitSelectors) {
+      const button = Array.from(document.querySelectorAll(selector))
+        .find((element) => isUsablePaginationButton(element));
+      if (button) return button;
+    }
+
+    const numericButtons = Array.from(document.querySelectorAll("button, li, [role='button']"))
+      .filter((element) => !isInsideDownloader(element) && isVisible(element))
+      .filter((element) => /^\d+$/.test(cleanText(element.innerText || "")))
+      .filter((element) => element.getBoundingClientRect().top > window.innerHeight * 0.65);
+
+    for (const current of numericButtons) {
+      const isCurrent = current.getAttribute("aria-current") === "page"
+        || /active|selected|current|checked/i.test(String(current.className || ""))
+        || current.getAttribute("data-active") === "true";
+      if (!isCurrent) continue;
+      const container = current.closest("nav, ul, [class*='pagination' i], [class*='pager' i]") || current.parentElement;
+      const controls = Array.from(container?.querySelectorAll("button, li, [role='button']") || [])
+        .filter((element) => !isInsideDownloader(element) && isVisible(element));
+      const currentIndex = controls.indexOf(current);
+      const next = controls.slice(currentIndex + 1).find((element) => {
+        const text = cleanText(element.innerText || "");
+        return !/^\d+$/.test(text) && !/^\.\.\.$/.test(text) && isUsablePaginationButton(element);
+      });
+      if (next) return next;
+
+      const last = controls[controls.length - 1];
+      if (last && last !== current && isUsablePaginationButton(last)) return last;
+    }
+    return null;
+  }
+
+  function isUsablePaginationButton(element) {
+    if (!element || isInsideDownloader(element) || !isVisible(element)) return false;
+    const button = element.matches("button") ? element : element.querySelector("button") || element;
+    const disabled = button.disabled
+      || button.getAttribute("aria-disabled") === "true"
+      || /disabled/i.test(String(button.className || ""));
+    return !disabled;
   }
 
   function scrollRankList(attempt = 0) {
@@ -1291,9 +1358,24 @@
     }).join("|");
     return {
       key,
+      page: getCurrentPageNumber(),
       scrollTop,
       mediaCount: collectVisiblePageVideos().length + collectCapturedMediaVideos().length
     };
+  }
+
+  function getCurrentPageNumber() {
+    const current = Array.from(document.querySelectorAll("button, li, [role='button']"))
+      .filter((element) => !isInsideDownloader(element) && isVisible(element))
+      .find((element) => {
+        const text = cleanText(element.innerText || "");
+        return /^\d+$/.test(text) && (
+          element.getAttribute("aria-current") === "page"
+          || /active|selected|current|checked/i.test(String(element.className || ""))
+          || element.getAttribute("data-active") === "true"
+        );
+      });
+    return current ? cleanText(current.innerText || "") : "";
   }
 
   function clearVisibleProbeMarks() {
