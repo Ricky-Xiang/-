@@ -14,6 +14,7 @@
     panelOpen: true,
     busy: false,
     stop: false,
+    runId: 0,
     rankItems: new Map(),
     mediaItems: new Map(),
     started: 0,
@@ -183,6 +184,9 @@
 
   async function startDownload() {
     if (state.busy) return;
+    state.runId += 1;
+    state.stop = false;
+    const runId = state.runId;
     const settings = readSettings();
     await persistSettings();
     scanPageForVideoIds(false);
@@ -191,6 +195,8 @@
     const directVideos = collectVisiblePageVideos();
     const capturedVideos = collectCapturedMediaVideos();
     const firstPassVideos = [...directVideos, ...capturedVideos].slice(0, settings.maxItems);
+    if (state.stop || runId !== state.runId) return;
+
     if (firstPassVideos.length) {
       state.busy = true;
       state.started = firstPassVideos.length;
@@ -198,6 +204,7 @@
       state.failed = 0;
       setStatus(`发现 ${firstPassVideos.length} 个媒体地址，正在直接提交下载...`);
       try {
+        if (state.stop || runId !== state.runId) return;
         const result = await sendMessage({
           type: "DL_VIDEO_BATCH",
           payload: {
@@ -207,15 +214,19 @@
         });
         const started = result?.result?.started?.length || 0;
         const failed = result?.result?.failed?.length || 0;
-        state.completed = started;
-        state.failed = failed;
-        setStatus(`直接下载已提交。成功=${started}，跳过=${failed}`);
+        if (!state.stop && runId === state.runId) {
+          state.completed = started;
+          state.failed = failed;
+          setStatus(`直接下载已提交。成功=${started}，跳过=${failed}`);
+        }
       } finally {
         state.busy = false;
         updateUi();
       }
       return;
     }
+
+    if (state.stop || runId !== state.runId) return;
 
     const startResponse = await sendMessage({
       type: "SLOW_JOB_START",
@@ -234,7 +245,7 @@
     updateUi();
 
     try {
-      await processQueue(settings);
+      await processQueue(settings, runId);
     } finally {
       await sendMessage({ type: "SLOW_JOB_STOP" });
       state.busy = false;
@@ -244,6 +255,8 @@
 
   async function oneClickDownload() {
     if (state.busy) return;
+    state.runId += 1;
+    const runId = state.runId;
     const settings = readSettings();
     await persistSettings();
 
@@ -259,21 +272,21 @@
       collectVisibleDetailLinks();
 
       let mediaCount = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
-      if (!mediaCount) {
-        await triggerFirstPlayableVideo();
-        mediaCount = await waitForMediaReady(15000);
+      if (!mediaCount && !state.stop && runId === state.runId) {
+        await triggerFirstPlayableVideo(runId);
+        mediaCount = await waitForMediaReady(15000, 0, runId);
       }
 
-      setStatus(`一键下载：已发现媒体=${mediaCount}，开始下载...`);
+      if (!state.stop && runId === state.runId) setStatus(`一键下载：已发现媒体=${mediaCount}，开始下载...`);
     } finally {
       state.busy = false;
       updateUi();
     }
 
-    if (!state.stop) await startDownload();
+    if (!state.stop && runId === state.runId) await startDownload();
   }
 
-  async function triggerFirstPlayableVideo() {
+  async function triggerFirstPlayableVideo(runId = state.runId) {
     const candidates = collectClickableVideoCandidates().slice(0, 8);
     if (!candidates.length) {
       setStatus("一键下载：没有找到可点击的视频入口。");
@@ -281,13 +294,13 @@
     }
 
     for (const candidate of candidates) {
-      if (state.stop) return false;
+      if (state.stop || runId !== state.runId) return false;
       const beforeUrl = location.href;
       const beforeMedia = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
       dispatchRealClick(candidate);
       setStatus("一键下载：已点击一个可见视频入口，等待媒体地址...");
 
-      const ready = await waitForMediaReady(5000, beforeMedia);
+      const ready = await waitForMediaReady(5000, beforeMedia, runId);
       if (ready > beforeMedia) return true;
 
       const urlVideoId = new URL(location.href).searchParams.get("video_id") || "";
@@ -302,10 +315,11 @@
     return false;
   }
 
-  async function waitForMediaReady(timeoutMs, previousCount = 0) {
+  async function waitForMediaReady(timeoutMs, previousCount = 0, runId = state.runId) {
     const startedAt = Date.now();
     let lastCount = previousCount;
     while (Date.now() - startedAt < timeoutMs) {
+      if (state.stop || runId !== state.runId) return lastCount;
       scanPageForVideoIds(false);
       collectVisibleDetailLinks();
       const count = collectVisiblePageVideos().length + collectCapturedMediaVideos().length;
@@ -318,13 +332,17 @@
 
   async function stopDownload() {
     state.stop = true;
+    state.runId += 1;
+    state.busy = false;
     setStatus("已收到停止指令。");
     await sendMessage({ type: "SLOW_JOB_STOP" });
+    updateUi();
   }
 
   async function resetDownloadState() {
     state.busy = false;
     state.stop = false;
+    state.runId += 1;
     state.started = 0;
     state.completed = 0;
     state.failed = 0;
@@ -333,16 +351,16 @@
     updateUi();
   }
 
-  async function processQueue(settings) {
+  async function processQueue(settings, runId = state.runId) {
     let idleRounds = 0;
-    while (!state.stop && state.started < settings.maxItems && idleRounds < 5) {
+    while (!state.stop && runId === state.runId && state.started < settings.maxItems && idleRounds < 5) {
       const beforeCount = state.rankItems.size;
       scanPageForVideoIds(false);
       collectVisibleDetailLinks();
 
       const queue = Array.from(state.rankItems.values()).filter((item) => !item.__handled && item.videoId);
       if (!queue.length) {
-        const harvested = await harvestVideoIdsByClicking(settings.maxItems - state.started);
+        const harvested = await harvestVideoIdsByClicking(settings.maxItems - state.started, runId);
         if (harvested > 0) {
           idleRounds = 0;
           continue;
@@ -355,7 +373,7 @@
 
       idleRounds = state.rankItems.size === beforeCount ? idleRounds + 1 : 0;
       for (const item of queue) {
-        if (state.stop || state.started >= settings.maxItems) break;
+        if (state.stop || runId !== state.runId || state.started >= settings.maxItems) break;
         item.__handled = true;
         state.started += 1;
 
@@ -373,6 +391,7 @@
 
         setStatus(`正在打开详情 ${state.started}/${settings.maxItems}：${meta.title || meta.videoId}`);
         const before = await getJobStatus();
+        if (state.stop || runId !== state.runId) break;
         await sendMessage({ type: "SLOW_JOB_EXPECT_DETAIL", payload: { meta } });
         const openResult = await sendMessage({ type: "SLOW_OPEN_DETAIL_TAB", payload: { meta, baseUrl: location.origin } });
         if (!openResult?.ok) {
@@ -381,7 +400,7 @@
           continue;
         }
 
-        await waitForOneDetailResult(before, settings.detailTimeoutMs, token);
+        await waitForOneDetailResult(before, settings.detailTimeoutMs, token, runId);
         const after = await getJobStatus();
         state.completed = after.completed || state.completed;
         state.failed = after.failed || state.failed;
@@ -392,7 +411,7 @@
     setStatus(state.stop ? "已停止。" : "处理结束：没有更多可识别的视频。");
   }
 
-  async function harvestVideoIdsByClicking(limit) {
+  async function harvestVideoIdsByClicking(limit, runId = state.runId) {
     if (limit <= 0 || isDetailPage()) return 0;
 
     const originalUrl = location.href;
@@ -402,7 +421,7 @@
 
     let addedTotal = 0;
     for (const element of candidates) {
-      if (state.stop) break;
+      if (state.stop || runId !== state.runId) break;
       element.setAttribute("data-luopan-dl-probed", "true");
       setStatus(`Probing visible video cards... total=${state.rankItems.size}`);
 
@@ -784,12 +803,12 @@
     return added;
   }
 
-  async function waitForOneDetailResult(before, timeoutMs, token) {
+  async function waitForOneDetailResult(before, timeoutMs, token, runId = state.runId) {
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
       const current = await getJobStatus();
       if ((current.completed || 0) > (before.completed || 0) || (current.failed || 0) > (before.failed || 0)) return current;
-      if (state.stop) return current;
+      if (state.stop || runId !== state.runId) return current;
       await delay(1200);
     }
     await sendMessage({ type: "SLOW_JOB_DETAIL_TIMEOUT", payload: { token, reason: "detail timeout: no video.src" } });
